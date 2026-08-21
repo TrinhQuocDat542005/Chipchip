@@ -1,0 +1,6 @@
+{
+  "name": "AI Video Factory",
+  "description": "Automated 9:16 AI short video generation factory with script generation, visual style profiling, scene studio, TTS narration, and server-side video rendering pipeline.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,33 @@
+node_modules/
+build/
+dist/
+coverage/
+.venv*/
+__pycache__/
+*.py[cod]
+storage/
+data/
+.cache/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Local binaries and generated review artifacts
+tools/ffmpeg/
+tools/blur_tests/
+tools/sample_crops/
+tools/sample_frames/
+tools/watermark_analysis/
+artifacts/
+
+# Source/test media kept outside version control
+Thanh_Pho_Hu_Hoa_Original/
+sample_fast_audios/
+sample_final_5_across_projects/
+sample_pilot_10_new/
+temp/
+/t_21.mp3
+/t23.mp3
+/temp_20.mp3
+/test_11.mp3

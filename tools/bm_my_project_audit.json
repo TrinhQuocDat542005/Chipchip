@@ -1,0 +1,34 @@
+{
+  "result": {
+    "system_name": "my-project",
+    "sub_file_path": "D:/AutoDub Sub/ai-video-factory/storage/dub-1786453409257/dub-work/translated.srt",
+    "dub_file_path": "d:\\AutoDub Sub\\ai-video-factory\\storage\\dub-1786453409257\\source.mp4",
+    "max_cps": 18.43,
+    "avg_timestamp_offset_ms": 17.1,
+    "min_gap_between_lines_ms": 90.0,
+    "encoding_valid": true,
+    "max_duration_deviation_pct": 51.05,
+    "cumulative_drift_ms": 1.0,
+    "lufs_variance": 0.23,
+    "background_audio_preserved": true,
+    "voice_consistency": true,
+    "unit_tests_passed": true,
+    "integration_tests_passed": true,
+    "stability_variance_pct": 1.2
+  },
+  "checks": {
+    "cps_ok": true,
+    "timestamp_offset_ok": true,
+    "line_gap_ok": true,
+    "encoding_ok": true,
+    "duration_deviation_ok": false,
+    "drift_ok": true,
+    "lufs_ok": true,
+    "background_audio_ok": true,
+    "voice_consistency_ok": true,
+    "unit_tests_ok": true,
+    "integration_tests_ok": true,
+    "stability_ok": true,
+    "ALL_PASS": false
+  }
+}

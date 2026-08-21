@@ -1,0 +1,32 @@
+{
+  "result": {
+    "system_name": "my-project",
+    "max_cps": 25.48,
+    "avg_timestamp_offset_ms": 23.3,
+    "min_gap_between_lines_ms": 0.0,
+    "encoding_valid": true,
+    "max_duration_deviation_pct": 0.0,
+    "cumulative_drift_ms": 1.0,
+    "lufs_variance": 0.23,
+    "background_audio_preserved": true,
+    "voice_consistency": true,
+    "unit_tests_passed": true,
+    "integration_tests_passed": true,
+    "stability_variance_pct": 1.2
+  },
+  "checks": {
+    "cps_ok": false,
+    "timestamp_offset_ok": true,
+    "line_gap_ok": false,
+    "encoding_ok": true,
+    "duration_deviation_ok": true,
+    "drift_ok": true,
+    "lufs_ok": true,
+    "background_audio_ok": true,
+    "voice_consistency_ok": true,
+    "unit_tests_ok": true,
+    "integration_tests_ok": true,
+    "stability_ok": true,
+    "ALL_PASS": false
+  }
+}
