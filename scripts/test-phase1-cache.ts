@@ -121,7 +121,14 @@ async function main() {
 
     process.env.VIDEO_FACTORY_DB_PATH = path.join(temporaryRoot, 'phase1-test.db');
     const { projectStore } = await import('../src/services/projectStore');
+    const { jobQueue } = await import('../src/services/jobQueue');
     projectStore.saveDubbingProject(project);
+    const enqueueStartedAt = performance.now();
+    const previewJob = jobQueue.enqueue({ projectId: project.id, sceneId: changed.id, type: 'DUB_SEGMENT_PREVIEW', maxAttempts: 1 });
+    const enqueueDurationMs = performance.now() - enqueueStartedAt;
+    assert.ok(enqueueDurationMs < 2_000, `Preview job enqueue took ${enqueueDurationMs.toFixed(1)}ms`);
+    assert.equal(previewJob.status, 'PENDING');
+    assert.equal(previewJob.scene_id, changed.id);
     const { DatabaseSync } = await import('node:sqlite');
     const verificationDatabase = new DatabaseSync(process.env.VIDEO_FACTORY_DB_PATH, { readOnly: true });
     const storedRow = verificationDatabase.prepare('SELECT data FROM dubbing_projects WHERE id=?').get(project.id) as { data: string };
@@ -145,6 +152,8 @@ async function main() {
       same_segment_race_max_concurrency: maxActiveForKey,
       atomic_asset_replace: 'PASS',
       atomic_db_segment_count: storedProject.segments.length,
+      preview_job_enqueue_ms: Number(enqueueDurationMs.toFixed(2)),
+      preview_job_status: previewJob.status,
       all_pass: true,
     }, null, 2));
   } finally {

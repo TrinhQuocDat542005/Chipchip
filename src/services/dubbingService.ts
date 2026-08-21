@@ -364,6 +364,7 @@ async function generateSegmentPreviewInternal(
   cadenceAttempt=0,
   execution?:DubbingExecutionContext,
 ){
+  const renderStartedAt=performance.now();
   const config=execution?.config??resolveDubbingRenderConfig(project);
   const runFfmpeg=execution?.runFfmpeg??withFfmpegSlot;
   const contentHash=buildSegmentContentHash(project,segment,config);
@@ -379,7 +380,9 @@ async function generateSegmentPreviewInternal(
   segment.compressed_text=undefined;
   let synthesisText=normalizeDubbingText(segment.translated_text);
   if(!hasSpokenContent(synthesisText)) throw new Error('Đoạn này chỉ có dấu câu hoặc ký hiệu nên không cần tạo giọng.');
+  let ttsStartedAt=performance.now();
   let voice=await synthesizeWithRetry({text:synthesisText,language:project.target_language,voice:voiceProfile},config,segment.id);
+  let ttsDurationMs=performance.now()-ttsStartedAt;
   const automatic=(segment.voice_timing_mode??'AUTO')==='AUTO';
   const segmentIndex=project.segments.indexOf(segment);
   const nextEnabled=project.segments.slice(segmentIndex+1).find(item=>item.enabled&&item.translated_text.trim());
@@ -399,7 +402,9 @@ async function generateSegmentPreviewInternal(
     // a line merely to make the timeline turn green.
     if(concise && concise!==synthesisText&&namesPreserved&&retainedWords>=Math.ceil(originalWords*.62)){
       synthesisText=normalizeDubbingText(concise);segment.compressed_text=synthesisText;
+      ttsStartedAt=performance.now();
       voice=await synthesizeWithRetry({text:synthesisText,language:project.target_language,voice:voiceProfile},config,segment.id);
+      ttsDurationMs+=performance.now()-ttsStartedAt;
       fitSpeed=voice.durationSeconds/available;
     }
   }
@@ -432,8 +437,12 @@ async function generateSegmentPreviewInternal(
   // Trim leading silence and trailing silence (via areverse) while preserving 100%
   // of internal pauses between spoken words, then append a 0.18s natural cushion.
   const silenceCleanup='silenceremove=start_periods=1:start_duration=0.05:start_threshold=-38dB,areverse,silenceremove=start_periods=1:start_duration=0.05:start_threshold=-38dB,areverse,apad=pad_dur=0.18';
+  const audioFilterStartedAt=performance.now();
   await runFfmpeg(() => run(ffmpeg(),['-y','-i',raw,'-filter:a',`${silenceCleanup},atempo=${speed}`,adjusted]));
+  const audioFilterDurationMs=performance.now()-audioFilterStartedAt;
+  const probeStartedAt=performance.now();
   const adjustedInfo=await probeMedia(adjusted);
+  const probeDurationMs=performance.now()-probeStartedAt;
   segment.voice_duration=adjustedInfo.audio?.duration??adjustedInfo.duration;
   segment.voice_overflow=Math.max(0,segment.voice_duration-available);
   segment.voice_words_per_second=wordCount/Math.max(.25,segment.voice_duration);
@@ -443,12 +452,14 @@ async function generateSegmentPreviewInternal(
   if(cadenceAttempt<2&&(segment.voice_words_per_second<2.9||segment.voice_words_per_second>5.15)){
     return generateSegmentPreviewInternal(project,segment,index,cadenceAttempt+1,execution);
   }
+  const assetStartedAt=performance.now();
   const {readFile}=await import('node:fs/promises');
   segment.voice_url=await saveProjectAsset(project.id,`segment-${suffix}-${contentHash.slice(0,16)}-voice.wav`,await readFile(adjusted));
+  const assetDurationMs=performance.now()-assetStartedAt;
   segment.timing_quality=segment.voice_overflow>.08?'NEEDS_REVIEW':Math.abs(speed-1)>.12?'ADJUSTED':'NATURAL';
   reflowVoiceTimeline(project);
   const cache=await markSegmentCacheRendered(project,segment,config,contentHash);
-  console.log(`[segment-render] project=${project.id} segment=${segment.id} hash=${contentHash.slice(0,12)} physical=${segment.voice_duration.toFixed(3)}s db=${cache.duration_seconds.toFixed(3)}s delta=${Math.abs(segment.voice_duration-cache.duration_seconds).toFixed(3)}s bytes=${cache.file_size_bytes}`);
+  console.log(`[segment-render] project=${project.id} segment=${segment.id} hash=${contentHash.slice(0,12)} physical=${segment.voice_duration.toFixed(3)}s db=${cache.duration_seconds.toFixed(3)}s delta=${Math.abs(segment.voice_duration-cache.duration_seconds).toFixed(3)}s bytes=${cache.file_size_bytes} total_ms=${(performance.now()-renderStartedAt).toFixed(1)} tts_ms=${ttsDurationMs.toFixed(1)} audio_filter_ms=${audioFilterDurationMs.toFixed(1)} probe_ms=${probeDurationMs.toFixed(1)} asset_ms=${assetDurationMs.toFixed(1)}`);
   return segment;
 }
 

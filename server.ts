@@ -871,17 +871,13 @@ async function startServer() {
     if(existing)return res.status(202).json({job:existing,reused:true});
     res.status(202).json({ job: jobQueue.enqueue({ projectId: item.id, type: 'DUB_RENDER', maxAttempts: 1 }) });
   });
-  app.post('/api/dubbing/:id/segments/:segmentId/preview', async (req, res) => {
+  app.post('/api/dubbing/:id/segments/:segmentId/preview', (req, res) => {
     const item = projectStore.getDubbingProject(req.params.id);
     const segment = item?.segments.find(s => s.id === req.params.segmentId);
     if (!item || !segment) return res.status(404).json({ error: 'Không tìm thấy đoạn thoại' });
-    try {
-      await generateSegmentPreview(item, segment);
-      projectStore.saveDubbingProject(item);
-      res.json({segment,segments:item.segments});
-    } catch (error) {
-      res.status(500).json({ error: (error as Error).message });
-    }
+    const existing=projectStore.getAllJobs().find(job=>job.project_id===item.id&&job.scene_id===segment.id&&job.type==='DUB_SEGMENT_PREVIEW'&&(job.status==='PENDING'||job.status==='RUNNING'));
+    if(existing)return res.status(202).json({job:existing,reused:true});
+    res.status(202).json({job:jobQueue.enqueue({projectId:item.id,sceneId:segment.id,type:'DUB_SEGMENT_PREVIEW',maxAttempts:1})});
   });
 
   // Series & Knowledge Hub API
@@ -1313,6 +1309,15 @@ function registerJobHandlers() {
     activeDubRenders.add(item.id);
     item.status=item.mode==='SUBTITLES'?'RENDERING':'GENERATING_VOICE';item.progress=5;item.error_message=undefined;projectStore.saveDubbingProject(item);
     try{item.output_video_url=await renderDub(item,(p,m)=>{item.status=p<70&&item.mode!=='SUBTITLES'?'GENERATING_VOICE':'RENDERING';item.progress=p;projectStore.saveDubbingProject(item);update(p,m)});item.status='COMPLETED';item.progress=100;item.error_message=undefined;projectStore.saveDubbingProject(item);}catch(error){item.status='FAILED';item.error_message=(error as Error).message;projectStore.saveDubbingProject(item);throw error;}finally{activeDubRenders.delete(item.id);}
+  });
+  jobQueue.register('DUB_SEGMENT_PREVIEW', async ({job,update})=>{
+    const item=projectStore.getDubbingProject(job.project_id);
+    const segment=item?.segments.find(candidate=>candidate.id===job.scene_id);
+    if(!item||!segment)throw new NonRetryableJobError('Không tìm thấy project hoặc đoạn thoại để tạo giọng thử.');
+    update(5,`Đang kiểm tra cache cho ${segment.id}`);
+    await generateSegmentPreview(item,segment);
+    projectStore.saveDubbingProject(item);
+    update(100,`Đã cập nhật giọng thử ${segment.id}`);
   });
 }
 

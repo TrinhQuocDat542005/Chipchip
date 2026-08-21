@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { stat } from 'node:fs/promises';
 import { DubbingProject } from '../src/types';
-import { renderDub } from '../src/services/dubbingService';
+import { generateSegmentPreview, renderDub } from '../src/services/dubbingService';
 import { resolveMediaUrl } from '../src/services/assetStorage';
 import { inspectSegmentCache } from '../src/services/segmentCacheService';
 import { mapWithConcurrency, resolveDubbingRenderConfig } from '../src/services/renderRuntime';
@@ -9,6 +9,7 @@ import { projectStore } from '../src/services/projectStore';
 
 const projectId = process.argv[2] || 'dub-1786898959225';
 const segmentId = process.argv[3] || 'seg-29';
+const previewOnly = process.argv.includes('--preview-only');
 const databasePath = process.env.VIDEO_FACTORY_DB_PATH || 'data/video-factory.db';
 
 async function inspect(project: DubbingProject) {
@@ -49,10 +50,13 @@ async function main() {
 
   const startedAt = performance.now();
   let changedSegmentFinishedAt: number | undefined;
-  const outputUrl = await renderDub(testProject, (progress) => {
-    if (progress >= 65 && changedSegmentFinishedAt === undefined) changedSegmentFinishedAt = performance.now();
-  });
+  const outputUrl = previewOnly
+    ? (await generateSegmentPreview(testProject, edited, testProject.segments.indexOf(edited) + 1), edited.voice_url)
+    : await renderDub(testProject, (progress) => {
+      if (progress >= 65 && changedSegmentFinishedAt === undefined) changedSegmentFinishedAt = performance.now();
+    });
   const finishedAt = performance.now();
+  if (previewOnly) changedSegmentFinishedAt = finishedAt;
   const after = await inspect(testProject);
   const outputPath = resolveMediaUrl(outputUrl);
   if (!outputPath) throw new Error(`Invalid render output URL: ${outputUrl}`);
@@ -72,11 +76,12 @@ async function main() {
     edited_segment_id: segmentId,
     original_text: originalText,
     edited_text: edited.translated_text,
+    mode: previewOnly ? 'segment-preview' : 'full-video',
     before_cache_hits: beforeHits.length,
     before_cache_misses: beforeMisses.length,
     changed_segment_render_ms: Number(segmentRenderMs.toFixed(2)),
     changed_segment_under_2_seconds: segmentRenderMs < 2_000,
-    full_video_render_ms: Number(totalRenderMs.toFixed(2)),
+    full_video_render_ms: previewOnly ? null : Number(totalRenderMs.toFixed(2)),
     after_cache_hits: after.filter((item) => item.hit).length,
     after_cache_misses: after.filter((item) => !item.hit).length,
     output_file_bytes: outputFile.size,

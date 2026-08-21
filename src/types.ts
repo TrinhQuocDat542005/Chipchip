@@ -96,6 +96,7 @@ export interface GenerationJob {
     | 'RUN_AUTOMATION'
     | 'PUBLISH_SOCIAL'
     | 'DUB_TRANSCRIBE'
+    | 'DUB_SEGMENT_PREVIEW'
     | 'DUB_RENDER';
   status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
   progress: number;
