@@ -169,14 +169,13 @@ export const DubbingStudio: React.FC = () => {
       const r = await fetch(`/api/dubbing/${active.id}/segments/${seg.id}/preview`, { method: 'POST' });
       const b = await r.json();
       if (!r.ok) throw new Error(b.error);
-
-      const generated = b.segment ?? b;
-      generated.voice_outdated = false;
+      await waitJob(b.job.id);
+      const refreshed = await fetch(`/api/dubbing/${active.id}`);
+      const updated = await refreshed.json() as DubbingProject;
+      if (!refreshed.ok) throw new Error((updated as unknown as {error?:string}).error || 'Không tải lại được project');
+      const generated = updated.segments.find(candidate => candidate.id === seg.id);
+      if (!generated) throw new Error('Đoạn thoại không còn tồn tại sau khi tạo giọng');
       audioMixer.invalidateVoice(generated.voice_url);
-      const segments = [...active.segments];
-      const reflowed = Array.isArray(b.segments) ? b.segments : segments;
-      reflowed[index] = generated;
-      const updated = { ...active, segments: reflowed };
       setActive(updated);
       void audioMixer.preloadSegments([generated]);
     } catch (e) {

@@ -96,6 +96,7 @@ export interface GenerationJob {
     | 'RUN_AUTOMATION'
     | 'PUBLISH_SOCIAL'
     | 'DUB_TRANSCRIBE'
+    | 'DUB_SEGMENT_PREVIEW'
     | 'DUB_RENDER';
   status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
   progress: number;
@@ -216,6 +217,26 @@ export interface ProjectSnapshot {
   created_at: string;
 }
 
+export interface DubbingRenderConfig {
+  segment_concurrency: number;
+  ffmpeg_concurrency: number;
+  tts_max_attempts: number;
+  retry_base_delay_ms: number;
+  retry_max_delay_ms: number;
+  speed_cap: number;
+  cache_hash_algorithm: 'sha256';
+}
+
+export interface SegmentVoiceCacheMetadata {
+  content_hash: string;
+  hash_algorithm: 'sha256';
+  pipeline_version: string;
+  file_size_bytes: number;
+  duration_seconds: number;
+  created_at: string;
+  last_verified_at: string;
+}
+
 export interface DubbingSegment {
   id: string;
   start: number;
@@ -240,6 +261,7 @@ export interface DubbingSegment {
   voice_freeze_frame_ms?: number;
   compressed_text?: string;
   reviewed?: boolean;
+  voice_cache?: SegmentVoiceCacheMetadata;
 }
 
 export interface DubbingProject {
@@ -286,6 +308,7 @@ export interface DubbingProject {
   hf_token?: string;
   glossary?: string;
   characters?: CharacterProfile[];
+  render_config?: DubbingRenderConfig;
   segments: DubbingSegment[];
   output_video_url?: string;
   error_message?: string;

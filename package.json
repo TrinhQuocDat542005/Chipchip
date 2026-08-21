@@ -10,7 +10,10 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:phase1": "tsx scripts/test-phase1-cache.ts",
+    "test:phase1-real": "tsx scripts/test-phase1-real-segment.ts",
+    "audit:phase1-cache": "tsx scripts/audit-phase1-real-cache.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

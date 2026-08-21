@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { GenerationJob } from '../types';
 import { projectStore } from './projectStore';
+import { exponentialBackoffDelay } from './retryPolicy';
 
 export class NonRetryableJobError extends Error {}
 
@@ -16,6 +17,10 @@ class PersistentJobQueue {
   private running = new Set<string>();
   private timer?: NodeJS.Timeout;
   readonly events = new EventEmitter();
+  private readonly concurrency = (() => {
+    const configured = Number(process.env.JOB_QUEUE_CONCURRENCY || 2);
+    return Number.isFinite(configured) ? Math.max(1, Math.min(16, Math.floor(configured))) : 2;
+  })();
 
   register(type: GenerationJob['type'], handler: JobHandler) {
     this.handlers.set(type, handler);
@@ -51,11 +56,12 @@ class PersistentJobQueue {
     projectStore.recoverInterruptedJobs();
     this.timer = setInterval(() => void this.tick(), 750);
     this.timer.unref();
+    console.log(`[job-queue] started concurrency=${this.concurrency}`);
     void this.tick();
   }
 
   private async tick() {
-    const availableSlots = Math.max(0, 2 - this.running.size);
+    const availableSlots = Math.max(0, this.concurrency - this.running.size);
     if (!availableSlots) return;
     const jobs = projectStore.getRunnableJobs().slice(0, availableSlots);
     await Promise.all(jobs.map((job) => this.run(job)));
@@ -90,7 +96,12 @@ class PersistentJobQueue {
       job.error_message = message;
       if (!(error instanceof NonRetryableJobError) && job.attempt_count < job.max_attempts) {
         job.status = 'PENDING';
-        job.next_attempt_at = new Date(Date.now() + Math.min(30_000, 2 ** job.attempt_count * 1000)).toISOString();
+        const delayMs = exponentialBackoffDelay(
+          job.attempt_count,
+          Number(process.env.JOB_RETRY_BASE_DELAY_MS || 1000),
+          Number(process.env.JOB_RETRY_MAX_DELAY_MS || 30_000),
+        );
+        job.next_attempt_at = new Date(Date.now() + delayMs).toISOString();
       } else {
         job.status = 'FAILED';
         job.completed_at = new Date().toISOString();
@@ -104,6 +115,10 @@ class PersistentJobQueue {
 
   private emit(job: GenerationJob) {
     this.events.emit('job', { ...job });
+  }
+
+  stats() {
+    return { running: this.running.size, concurrency: this.concurrency };
   }
 }
 

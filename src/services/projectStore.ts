@@ -17,7 +17,7 @@ export class ProjectStore {
   private dubbingProjects: Map<string, DubbingProject> = new Map();
 
   constructor() {
-    const databasePath = path.resolve('data', 'video-factory.db');
+    const databasePath = path.resolve(process.env.VIDEO_FACTORY_DB_PATH || path.join('data', 'video-factory.db'));
     mkdirSync(path.dirname(databasePath), { recursive: true });
     this.database = new DatabaseSync(databasePath);
     this.database.exec(`
@@ -506,8 +506,18 @@ export class ProjectStore {
   }
 
   public saveDubbingProject(item: DubbingProject) {
-    item.updated_at = new Date().toISOString(); this.dubbingProjects.set(item.id, item);
-    this.database.prepare('INSERT INTO dubbing_projects (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at').run(item.id, JSON.stringify(item), item.updated_at);
+    const updatedAt = new Date().toISOString();
+    const serialized = JSON.stringify({ ...item, updated_at: updatedAt });
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      this.database.prepare('INSERT INTO dubbing_projects (id, data, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at').run(item.id, serialized, updatedAt);
+      this.database.exec('COMMIT');
+    } catch (error) {
+      try { this.database.exec('ROLLBACK'); } catch { /* Preserve the original write error. */ }
+      throw error;
+    }
+    item.updated_at = updatedAt;
+    this.dubbingProjects.set(item.id, item);
     return item;
   }
   public getDubbingProject(id: string) { return this.dubbingProjects.get(id); }
@@ -596,6 +606,10 @@ export class ProjectStore {
 
   public getSettingsByPrefix(prefix: string): Array<{ key:string; value:string }> {
     return this.database.prepare('SELECT key, value FROM settings WHERE key LIKE ? ORDER BY key').all(`${prefix}%`) as Array<{ key:string; value:string }>;
+  }
+
+  public close() {
+    this.database.close();
   }
 }
 
