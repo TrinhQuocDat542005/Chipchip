@@ -729,7 +729,7 @@ async function startServer() {
     const project = projectStore.getProject(req.params.id); if (!project) return res.status(404).json({ error: 'Project not found' });
     const item = await publishProject(project, req.body.platform || 'Export Package'); res.status(item.status === 'FAILED' ? 400 : 201).json(item);
   });
-  app.get('/api/health', (_req, res) => res.json({ status: 'ok', uptime_seconds: Math.round(process.uptime()), queue: { pending: projectStore.getRunnableJobs().length }, database: 'connected', timestamp: new Date().toISOString() }));
+  app.get('/api/health', (_req, res) => res.json({ status: 'ok', uptime_seconds: Math.round(process.uptime()), queue: { pending: projectStore.getRunnableJobs().length, ...jobQueue.stats() }, database: 'connected', timestamp: new Date().toISOString() }));
   app.get('/api/ready', (_req, res) => res.json({ ready: true }));
 
   // Video dubbing studio

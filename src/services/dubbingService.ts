@@ -1,11 +1,14 @@
 import { spawn } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { DubbingProject, DubbingSegment } from '../types';
+import { DubbingProject, DubbingRenderConfig, DubbingSegment } from '../types';
 import { getStorageRoot, resolveMediaUrl, saveProjectAsset } from './assetStorage';
 import { getTTSProvider, TTSRequest } from './tts';
 import { GoogleGenAI } from '@google/genai';
 import { probeMedia } from './mediaProbeService';
+import { applyCacheInspection, buildSegmentContentHash, inspectSegmentCache, markSegmentCacheRendered } from './segmentCacheService';
+import { createFfmpegLimiter, mapWithConcurrency, resolveDubbingRenderConfig, withFfmpegSlot, withKeyedLock } from './renderRuntime';
+import { withExponentialBackoff } from './retryPolicy';
 
 const ffmpeg = () => process.env.FFMPEG_PATH || 'ffmpeg';
 
@@ -219,6 +222,9 @@ export async function renderDub(project: DubbingProject, onProgress?: (p:number,
   const input = resolveMediaUrl(project.source_video_url); if (!input) throw new Error('Invalid source video');
   project.render_warning=undefined;
   const mediaInfo = await probeMedia(input);
+  const renderConfig = resolveDubbingRenderConfig(project);
+  project.render_config = renderConfig;
+  const runFfmpeg = createFfmpegLimiter(renderConfig.ffmpeg_concurrency);
   const targetMediaDuration=mediaInfo.video?.duration??mediaInfo.duration;
   const dir = path.join(getStorageRoot(), project.id.replace(/[^a-zA-Z0-9._-]/g, '_'), 'dub-work'); await mkdir(dir,{recursive:true});
   // Translation models occasionally return punctuation-only fragments such as
@@ -232,14 +238,22 @@ export async function renderDub(project: DubbingProject, onProgress?: (p:number,
   const srtPath=path.join(dir,'translated.srt'); await writeFile(srtPath,srt,'utf8');
   let voiceSegments=enabled;
   if (project.mode !== 'SUBTITLES') {
-    for(let i=0;i<enabled.length;i++){
-      const seg=enabled[i]; onProgress?.(10+Math.round(i/enabled.length*55),`Tạo giọng ${i+1}/${enabled.length}`);
-      if(!seg.voice_url || seg.voice_outdated || seg.voice_signature!==voiceSignature(project,seg)) {
-        await generateSegmentPreview(project,seg,project.segments.indexOf(seg)+1);
-      }
-    }
+    const inspections = await mapWithConcurrency(enabled, Math.min(8, renderConfig.segment_concurrency * 2),
+      (segment) => inspectSegmentCache(project, segment, renderConfig));
+    const misses = inspections.filter((inspection) => !inspection.hit);
+    const hits = inspections.filter((inspection) => inspection.hit);
+    hits.forEach(applyCacheInspection);
+    console.log(`[smart-cache] project=${project.id} total=${enabled.length} hits=${hits.length} misses=${misses.length} migrated=${hits.filter(item=>item.migrated).length}`);
+    misses.forEach((item) => console.log(`[smart-cache] miss segment=${item.segment.id} reason=${item.reason} hash=${item.contentHash.slice(0,12)}`));
+    let completed = 0;
+    await mapWithConcurrency(misses, renderConfig.segment_concurrency, async (inspection) => {
+      await generateSegmentPreview(project, inspection.segment, project.segments.indexOf(inspection.segment) + 1, 0, { config: renderConfig, runFfmpeg });
+      completed += 1;
+      onProgress?.(10 + Math.round(completed / Math.max(1, misses.length) * 55), `Tạo lại ${completed}/${misses.length} đoạn thay đổi; tái sử dụng ${hits.length} đoạn`);
+    });
+    if (!misses.length) onProgress?.(65, `Smart Cache: tái sử dụng ${hits.length}/${enabled.length} đoạn, không gọi TTS`);
     reflowVoiceTimeline(project);
-    voiceSegments=await fitVoiceTailInsideVideo(project,enabled,targetMediaDuration,dir);
+    voiceSegments=await fitVoiceTailInsideVideo(project,enabled,targetMediaDuration,dir,renderConfig,runFfmpeg);
     if(!voiceSegments.length)throw new Error('Không còn đoạn giọng hợp lệ nằm trong thời lượng video.');
   }
   onProgress?.(70,project.blur_source_text!==false?'Đang che chữ gốc, trộn âm thanh và phụ đề':'Đang trộn âm thanh và phụ đề');
@@ -316,7 +330,7 @@ export async function renderDub(project: DubbingProject, onProgress?: (p:number,
   if(videoInput!=='[0:v]') maps[1]=videoInput;
   const filter=filters.join(';');
   args.push(filter?'-filter_complex':'-vf',filter || 'null',...maps,'-c:v','libx264','-preset','veryfast','-crf','20','-c:a','aac','-b:a','192k','-movflags','+faststart',out);
-  await run(ffmpeg(),args,dir,20*60_000);
+  await runFfmpeg(() => run(ffmpeg(),args,dir,20*60_000));
   const renderedInfo=await probeMedia(out);
   const videoDuration=renderedInfo.video?.duration??renderedInfo.duration;
   const audioDuration=renderedInfo.audio?.duration??renderedInfo.duration;
@@ -328,12 +342,44 @@ export async function renderDub(project: DubbingProject, onProgress?: (p:number,
   return `/media/${project.id.replace(/[^a-zA-Z0-9._-]/g,'_')}/dubbed.mp4?v=${Date.now()}`;
 }
 
-export async function generateSegmentPreview(project:DubbingProject,segment:DubbingSegment,index?:number,cadenceAttempt=0){
+interface DubbingExecutionContext {
+  config: DubbingRenderConfig;
+  runFfmpeg: <T>(task: () => Promise<T>) => Promise<T>;
+}
+
+export async function generateSegmentPreview(
+  project:DubbingProject,
+  segment:DubbingSegment,
+  index?:number,
+  cadenceAttempt=0,
+  execution?:DubbingExecutionContext,
+){
+  return withKeyedLock(`${project.id}:${segment.id}`, () => generateSegmentPreviewInternal(project,segment,index,cadenceAttempt,execution));
+}
+
+async function generateSegmentPreviewInternal(
+  project:DubbingProject,
+  segment:DubbingSegment,
+  index?:number,
+  cadenceAttempt=0,
+  execution?:DubbingExecutionContext,
+){
+  const config=execution?.config??resolveDubbingRenderConfig(project);
+  const runFfmpeg=execution?.runFfmpeg??withFfmpegSlot;
+  const contentHash=buildSegmentContentHash(project,segment,config);
+  if(cadenceAttempt===0){
+    const inspection=await inspectSegmentCache(project,segment,config);
+    if(inspection.hit){
+      applyCacheInspection(inspection);
+      console.log(`[smart-cache] hit segment=${segment.id} hash=${contentHash.slice(0,12)} bytes=${inspection.fileSizeBytes}`);
+      return segment;
+    }
+  }
   const voiceProfile=project.voice_profile && project.voice_profile!=='default' ? project.voice_profile : undefined;
   segment.compressed_text=undefined;
   let synthesisText=normalizeDubbingText(segment.translated_text);
   if(!hasSpokenContent(synthesisText)) throw new Error('Đoạn này chỉ có dấu câu hoặc ký hiệu nên không cần tạo giọng.');
-  let voice=await synthesizeWithRetry({text:synthesisText,language:project.target_language,voice:voiceProfile});
+  let voice=await synthesizeWithRetry({text:synthesisText,language:project.target_language,voice:voiceProfile},config,segment.id);
   const automatic=(segment.voice_timing_mode??'AUTO')==='AUTO';
   const segmentIndex=project.segments.indexOf(segment);
   const nextEnabled=project.segments.slice(segmentIndex+1).find(item=>item.enabled&&item.translated_text.trim());
@@ -353,7 +399,7 @@ export async function generateSegmentPreview(project:DubbingProject,segment:Dubb
     // a line merely to make the timeline turn green.
     if(concise && concise!==synthesisText&&namesPreserved&&retainedWords>=Math.ceil(originalWords*.62)){
       synthesisText=normalizeDubbingText(concise);segment.compressed_text=synthesisText;
-      voice=await synthesizeWithRetry({text:synthesisText,language:project.target_language,voice:voiceProfile});
+      voice=await synthesizeWithRetry({text:synthesisText,language:project.target_language,voice:voiceProfile},config,segment.id);
       fitSpeed=voice.durationSeconds/available;
     }
   }
@@ -368,7 +414,7 @@ export async function generateSegmentPreview(project:DubbingProject,segment:Dubb
   if (automatic) {
     if (voice.durationSeconds > targetMax) {
       // Auto Speed Fit with Hard Overflow Guard: trần tối đa 1.18x để bảo toàn ngữ điệu tự nhiên, tránh nuốt chữ
-      speed = Math.min(1.18, voice.durationSeconds / (origDuration * 0.98));
+      speed = Math.min(config.speed_cap, voice.durationSeconds / (origDuration * 0.98));
     } else if (voice.durationSeconds < targetMin) {
       speed = Math.max(0.88, voice.durationSeconds / (origDuration * 0.96));
     }
@@ -386,8 +432,7 @@ export async function generateSegmentPreview(project:DubbingProject,segment:Dubb
   // Trim leading silence and trailing silence (via areverse) while preserving 100%
   // of internal pauses between spoken words, then append a 0.18s natural cushion.
   const silenceCleanup='silenceremove=start_periods=1:start_duration=0.05:start_threshold=-38dB,areverse,silenceremove=start_periods=1:start_duration=0.05:start_threshold=-38dB,areverse,apad=pad_dur=0.18';
-  await run(ffmpeg(),['-y','-i',raw,'-filter:a',`${silenceCleanup},atempo=${speed}`,adjusted]);
-  const {readFile}=await import('node:fs/promises');segment.voice_url=await saveProjectAsset(project.id,`segment-${suffix}-voice.wav`,await readFile(adjusted));
+  await runFfmpeg(() => run(ffmpeg(),['-y','-i',raw,'-filter:a',`${silenceCleanup},atempo=${speed}`,adjusted]));
   const adjustedInfo=await probeMedia(adjusted);
   segment.voice_duration=adjustedInfo.audio?.duration??adjustedInfo.duration;
   segment.voice_overflow=Math.max(0,segment.voice_duration-available);
@@ -396,23 +441,37 @@ export async function generateSegmentPreview(project:DubbingProject,segment:Dubb
   // lethargic take even at 1.0x. Reject those takes and synthesize again; never
   // use atempo<1 (artificial slowing remains disabled).
   if(cadenceAttempt<2&&(segment.voice_words_per_second<2.9||segment.voice_words_per_second>5.15)){
-    return generateSegmentPreview(project,segment,index,cadenceAttempt+1);
+    return generateSegmentPreviewInternal(project,segment,index,cadenceAttempt+1,execution);
   }
+  const {readFile}=await import('node:fs/promises');
+  segment.voice_url=await saveProjectAsset(project.id,`segment-${suffix}-${contentHash.slice(0,16)}-voice.wav`,await readFile(adjusted));
   segment.timing_quality=segment.voice_overflow>.08?'NEEDS_REVIEW':Math.abs(speed-1)>.12?'ADJUSTED':'NATURAL';
   reflowVoiceTimeline(project);
-  segment.voice_outdated=false;
-  segment.voice_signature=voiceSignature(project,segment);return segment;
+  const cache=await markSegmentCacheRendered(project,segment,config,contentHash);
+  console.log(`[segment-render] project=${project.id} segment=${segment.id} hash=${contentHash.slice(0,12)} physical=${segment.voice_duration.toFixed(3)}s db=${cache.duration_seconds.toFixed(3)}s delta=${Math.abs(segment.voice_duration-cache.duration_seconds).toFixed(3)}s bytes=${cache.file_size_bytes}`);
+  return segment;
 }
 
-async function synthesizeWithRetry(request:TTSRequest){
-  let lastError: unknown;
-  for(let attempt=1;attempt<=3;attempt++){
-    try{return await getTTSProvider(request.voice).synthesize(request);}catch(error){lastError=error;if(attempt<3)await new Promise(resolve=>setTimeout(resolve,750));}
-  }
-  throw lastError;
+async function synthesizeWithRetry(request:TTSRequest,config:DubbingRenderConfig,segmentId:string){
+  return withExponentialBackoff(
+    () => getTTSProvider(request.voice).synthesize(request),
+    {
+      maxAttempts: config.tts_max_attempts,
+      baseDelayMs: config.retry_base_delay_ms,
+      maxDelayMs: config.retry_max_delay_ms,
+      onRetry: (error, attempt, delayMs) => console.warn(`[tts-retry] segment=${segmentId} attempt=${attempt}/${config.tts_max_attempts} delay_ms=${delayMs} error=${(error as Error).message}`),
+    },
+  );
 }
 
-async function fitVoiceTailInsideVideo(project:DubbingProject,segments:DubbingSegment[],mediaDuration:number,dir:string){
+async function fitVoiceTailInsideVideo(
+  project:DubbingProject,
+  segments:DubbingSegment[],
+  mediaDuration:number,
+  dir:string,
+  config:DubbingRenderConfig,
+  runFfmpeg:<T>(task:()=>Promise<T>)=>Promise<T>,
+){
   const safeEnd=Math.max(.25,mediaDuration-.08);
   const usable:DubbingSegment[]=[];
   let skipped=0;
@@ -430,13 +489,15 @@ async function fitVoiceTailInsideVideo(project:DubbingProject,segments:DubbingSe
     const suffix=(segment.id.match(/\d+$/)?.[0]??String(project.segments.indexOf(segment)+1)).padStart(3,'0');
     const adjusted=path.join(dir,`preview-tail-${suffix}.wav`);
     try{
-      await run(ffmpeg(),['-y','-i',input,'-filter:a',`atempo=${extraSpeed.toFixed(6)}`,adjusted]);
+      await runFfmpeg(() => run(ffmpeg(),['-y','-i',input,'-filter:a',`atempo=${extraSpeed.toFixed(6)}`,adjusted]));
       const {readFile}=await import('node:fs/promises');
-      segment.voice_url=await saveProjectAsset(project.id,`segment-${suffix}-voice.wav`,await readFile(adjusted));
-      segment.voice_duration=available;
+      const contentHash=buildSegmentContentHash(project,segment,config);
+      segment.voice_url=await saveProjectAsset(project.id,`segment-${suffix}-${contentHash.slice(0,16)}-voice.wav`,await readFile(adjusted));
+      const adjustedInfo=await probeMedia(adjusted);
+      segment.voice_duration=adjustedInfo.audio?.duration??adjustedInfo.duration;
       segment.voice_speed=Math.min(2.5,(segment.voice_speed??1)*extraSpeed);
       segment.timing_quality='ADJUSTED';
-      segment.voice_signature=voiceSignature(project,segment);
+      await markSegmentCacheRendered(project,segment,config,contentHash);
       usable.push(segment);
     }catch{segment.timing_quality='NEEDS_REVIEW';skipped++;}
   }
@@ -577,9 +638,6 @@ export async function analyzeStoryContext(project:DubbingProject,previousEpisode
   return project;
 }
 
-const VOICE_PIPELINE_VERSION='v3-cadence-content';
-function voiceSignature(project:DubbingProject,segment:DubbingSegment){return `${VOICE_PIPELINE_VERSION}|${segment.translated_text.trim()}|${segment.compressed_text??''}|${project.voice_profile??'default'}|${segment.voice_timing_mode??'AUTO'}|${Math.max(.7,Math.min(1.8,segment.voice_speed??1)).toFixed(2)}`;}
-
 function normalizeDubbingText(text:string){
   return text.trim().replace(/\bng\s+ta\b/giu,'người ta').replace(/\s+/g,' ').replace(/[.…]{2,}/g,'').replace(/\s*[-–—]\s*/g,', ').replace(/([!?]){2,}/g,'$1');
 }
@@ -592,7 +650,7 @@ export function isInvalidTranslationSegment(segment:DubbingSegment){
 
 function countSpokenWords(text:string){return Math.max(1,text.match(/[\p{L}\p{N}]+/gu)?.length??1);}
 
-function buildReadableSrt(segments:DubbingSegment[]){
+export function buildReadableSrt(segments:DubbingSegment[]){
   const rawCues:Array<{start:number;end:number;text:string}>=[];
   for(const segment of segments){
     const text=segment.translated_text.trim();

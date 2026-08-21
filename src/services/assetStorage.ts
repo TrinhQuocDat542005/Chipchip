@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'fs/promises';
+import { mkdir, rename, rm, writeFile } from 'fs/promises';
 import path from 'path';
 
 export function getStorageRoot() {
@@ -24,7 +24,14 @@ export async function saveProjectAsset(
   const safeFileName = sanitizeSegment(fileName);
   const directory = path.join(getStorageRoot(), safeProjectId);
   await mkdir(directory, { recursive: true });
-  await writeFile(path.join(directory, safeFileName), contents);
+  const target = path.join(directory, safeFileName);
+  const temporary = path.join(directory, `.${safeFileName}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
+  try {
+    await writeFile(temporary, contents, { flag: 'wx' });
+    await rename(temporary, target);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
   return `/media/${safeProjectId}/${safeFileName}`;
 }
 
